@@ -1,0 +1,7 @@
+.git
+.gitignore
+node_modules
+dist
+coverage
+.DS_Store
+config/discord-bridge.json

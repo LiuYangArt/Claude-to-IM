@@ -1,0 +1,17 @@
+services:
+  discord-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-to-im-discord
+    restart: unless-stopped
+    init: true
+    working_dir: /app
+    command: npm run example:discord
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ${BOT_CONFIG_DIR:-./config}:/app/config
+      - ${SOURCE_ROOT_DIR:-/Users/apple/CodeProjects/sutu}:${SOURCE_ROOT_DIR:-/Users/apple/CodeProjects/sutu}:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
