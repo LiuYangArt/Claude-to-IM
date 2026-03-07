@@ -181,11 +181,18 @@ function processWithSessionLock(sessionId: string, fn: () => Promise<void>): Pro
   const current = prev.then(fn, fn);
   state.sessionLocks.set(sessionId, current);
   // Cleanup when the chain completes
-  current.finally(() => {
-    if (state.sessionLocks.get(sessionId) === current) {
-      state.sessionLocks.delete(sessionId);
-    }
-  });
+  void current.then(
+    () => {
+      if (state.sessionLocks.get(sessionId) === current) {
+        state.sessionLocks.delete(sessionId);
+      }
+    },
+    () => {
+      if (state.sessionLocks.get(sessionId) === current) {
+        state.sessionLocks.delete(sessionId);
+      }
+    },
+  );
   return current;
 }
 

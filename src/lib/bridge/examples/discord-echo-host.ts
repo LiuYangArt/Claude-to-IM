@@ -2,6 +2,12 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import { initBridgeContext } from '../context';
 import * as bridgeManager from '../bridge-manager';
+import {
+  加载技能系统,
+  构建技能上下文,
+  type 技能系统,
+  type 只读源码配置,
+} from './discord-lightweight-skills';
 import type {
   BridgeStore,
   LLMProvider,
@@ -62,15 +68,7 @@ interface 已加载人格配置 {
   频道提示词: Map<string, string>;
 }
 
-interface 已规范源码配置 {
-  enabled: boolean;
-  rootDir: string;
-  readOnly: boolean;
-  maxFiles: number;
-  maxCharsPerFile: number;
-  maxTotalChars: number;
-  maxFileSizeBytes: number;
-}
+type 已规范源码配置 = 只读源码配置;
 
 const 忽略目录 = new Set([
   '.git',
@@ -283,12 +281,16 @@ class InMemoryStore implements BridgeStore {
 }
 
 class EchoLLM implements LLMProvider {
-  constructor(private readonly 源码配置: 已规范源码配置) {}
+  constructor(
+    private readonly 源码配置: 已规范源码配置,
+    private readonly 技能系统: 技能系统,
+  ) {}
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
-    const 源码上下文 = 构建只读源码上下文(params.prompt, params.workingDirectory, this.源码配置);
-    const response = 源码上下文
-      ? `收到：${params.prompt}\n\n我还读取了 ${源码上下文.命中文件数} 个只读源码片段作为参考。`
+    const 技能上下文 = 构建技能上下文(params.prompt, params.workingDirectory, this.源码配置, this.技能系统);
+    记录技能命中日志(技能上下文);
+    const response = 技能上下文.文本
+      ? `收到：${params.prompt}\n\n命中 Skill：${技能上下文.名称}\n命中原因：${技能上下文.原因}\n参考来源数：${技能上下文.来源.length}`
       : `收到：${params.prompt}`;
     return createSseTextStream(response);
   }
@@ -300,13 +302,15 @@ class OpenAICompatibleLLM implements LLMProvider {
     private readonly apiKey: string,
     private readonly model: string,
     private readonly 源码配置: 已规范源码配置,
+    private readonly 技能系统: 技能系统,
   ) {}
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     return new ReadableStream<string>({
       start: async controller => {
         try {
-          const 源码上下文 = 构建只读源码上下文(params.prompt, params.workingDirectory, this.源码配置);
+          const 技能上下文 = 构建技能上下文(params.prompt, params.workingDirectory, this.源码配置, this.技能系统);
+          记录技能命中日志(技能上下文);
           const response = await fetch(joinUrl(this.baseUrl, '/responses'), {
             method: 'POST',
             headers: {
@@ -316,7 +320,7 @@ class OpenAICompatibleLLM implements LLMProvider {
             body: JSON.stringify({
               model: params.model || this.model,
               stream: false,
-              input: buildInput(params, 源码上下文.文本),
+              input: buildInput(params, 技能上下文.文本),
               instructions: params.systemPrompt,
             }),
             signal: params.abortController?.signal,
@@ -409,6 +413,13 @@ function extractResponseText(data: any): string {
 
 function joinUrl(baseUrl: string, pathValue: string): string {
   return `${baseUrl.replace(/\/$/, '')}${pathValue}`;
+}
+
+function 记录技能命中日志(技能上下文: { 名称: string; 原因: string; 来源: string[] }) {
+  console.log(`[skill] 命中 ${技能上下文.名称} (${技能上下文.原因})`);
+  if (技能上下文.来源.length > 0) {
+    console.log(`[skill] 上下文来源: ${技能上下文.来源.join(', ')}`);
+  }
 }
 
 function 读取配置文件(): 桥接配置 {
@@ -529,18 +540,18 @@ function buildSettings(config: 桥接配置) {
   };
 }
 
-function createLlm(config: 桥接配置, 已规范源码: 已规范源码配置): LLMProvider {
+function createLlm(config: 桥接配置, 已规范源码: 已规范源码配置, 技能系统: 技能系统): LLMProvider {
   const openai = config.openai;
   if (openai?.enabled) {
     if (!openai.base_url?.trim() || !openai.api_key?.trim() || !openai.model?.trim()) {
       throw new Error('openai.enabled=true 时，必须填写 openai.base_url、openai.api_key、openai.model');
     }
     console.log(`[llm] 使用 OpenAI 兼容接口：${openai.base_url}`);
-    return new OpenAICompatibleLLM(openai.base_url.trim(), openai.api_key.trim(), openai.model.trim(), 已规范源码);
+    return new OpenAICompatibleLLM(openai.base_url.trim(), openai.api_key.trim(), openai.model.trim(), 已规范源码, 技能系统);
   }
 
   console.log('[llm] 当前使用 Echo 模式');
-  return new EchoLLM(已规范源码);
+  return new EchoLLM(已规范源码, 技能系统);
 }
 
 function 提取关键词(问题: string): string[] {
@@ -676,8 +687,9 @@ async function main() {
 
   const 已加载人格 = 加载人格配置(config);
   const 已规范源码 = 规范化源码配置(config);
+  const 技能系统 = 加载技能系统(process.cwd());
   const store = new InMemoryStore(buildSettings(config), 已加载人格);
-  const llm = createLlm(config, 已规范源码);
+  const llm = createLlm(config, 已规范源码, 技能系统);
   const permissions: PermissionGateway = { resolvePendingPermission: () => true };
   const lifecycle: LifecycleHooks = {
     onBridgeStart: () => console.log('[lifecycle] Bridge started'),
@@ -694,6 +706,7 @@ async function main() {
 
   console.log(`[ready] Discord bridge 已启动`);
   console.log(`[ready] 只读源码目录：${已规范源码.rootDir}`);
+  console.log(`[ready] 已加载 Skill 数量：${技能系统.技能列表.size}`);
   console.log(`[ready] 默认人格已${已加载人格.默认提示词 ? '加载' : '关闭'}，频道人格数量：${已加载人格.频道提示词.size}`);
   console.log('[ready] 现在去 Discord 发消息测试');
   console.log('[ready] 按 Ctrl+C 可退出');

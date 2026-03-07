@@ -23,11 +23,18 @@ function createSessionLocks() {
     const prev = locks.get(sessionId) || Promise.resolve();
     const current = prev.then(fn, fn);
     locks.set(sessionId, current);
-    current.finally(() => {
-      if (locks.get(sessionId) === current) {
-        locks.delete(sessionId);
-      }
-    });
+    void current.then(
+      () => {
+        if (locks.get(sessionId) === current) {
+          locks.delete(sessionId);
+        }
+      },
+      () => {
+        if (locks.get(sessionId) === current) {
+          locks.delete(sessionId);
+        }
+      },
+    );
     return current;
   }
 
