@@ -23,18 +23,12 @@ function createSessionLocks() {
     const prev = locks.get(sessionId) || Promise.resolve();
     const current = prev.then(fn, fn);
     locks.set(sessionId, current);
-    void current.then(
-      () => {
-        if (locks.get(sessionId) === current) {
-          locks.delete(sessionId);
-        }
-      },
-      () => {
-        if (locks.get(sessionId) === current) {
-          locks.delete(sessionId);
-        }
-      },
-    );
+    // Suppress unhandled rejection on the cleanup chain — callers handle the error on `current` directly
+    current.finally(() => {
+      if (locks.get(sessionId) === current) {
+        locks.delete(sessionId);
+      }
+    }).catch(() => {});
     return current;
   }
 

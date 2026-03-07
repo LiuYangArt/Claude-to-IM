@@ -26,6 +26,7 @@ const INTER_CHUNK_DELAY_MS = 300;
 const rateLimiter = new ChatRateLimiter();
 
 // Periodically clean up idle rate limiter buckets (every 5 minutes).
+// Use unref() so the timer doesn't prevent Node.js process exit (e.g. in tests).
 const rateLimiterCleanupTimer = setInterval(() => { rateLimiter.cleanup(); }, 5 * 60_000);
 rateLimiterCleanupTimer.unref?.();
 
