@@ -3,10 +3,11 @@ FROM node:20-slim
 WORKDIR /app
 
 COPY package*.json ./
+COPY tsconfig.json ./tsconfig.json
+COPY tsconfig.build.json ./tsconfig.build.json
+COPY src ./src
 RUN npm ci
 
-COPY tsconfig.json ./
-COPY src ./src
 COPY README.md ./README.md
 COPY README.zh-CN.md ./README.zh-CN.md
 COPY LICENSE ./LICENSE

@@ -38,6 +38,16 @@ const TYPING_INTERVAL_MS = 8000;
 /** Interaction TTL for answerCallback (60s). */
 const INTERACTION_TTL_MS = 60_000;
 
+export type Discord会话范围 = 'per_user' | 'per_thread' | 'per_channel';
+
+export interface Discord会话键参数 {
+  sessionScope: Discord会话范围;
+  guildId?: string | null;
+  channelId: string;
+  threadId?: string | null;
+  userId?: string | null;
+}
+
 /**
  * Lazily loaded discord.js module reference.
  * Populated in start() via dynamic import to avoid bundler issues.
@@ -50,6 +60,34 @@ async function loadDiscordJs() {
     discordJs = await import('discord.js');
   }
   return discordJs;
+}
+
+function 解析会话范围(raw: string | null): Discord会话范围 {
+  if (raw === 'per_thread' || raw === 'per_channel') return raw;
+  return 'per_user';
+}
+
+export function 构建Discord会话键(params: Discord会话键参数): string {
+  const guildId = params.guildId || '';
+  const channelOrThread = params.threadId || params.channelId;
+  const userId = params.userId || '';
+
+  if (params.sessionScope === 'per_channel') {
+    return guildId ? `${guildId}:${channelOrThread}` : params.channelId;
+  }
+
+  if (params.sessionScope === 'per_thread') {
+    if (guildId) {
+      return params.threadId ? `${guildId}:${params.threadId}` : `${guildId}:${params.channelId}`;
+    }
+    return params.channelId;
+  }
+
+  // per_user（默认）
+  if (guildId) {
+    return `${guildId}:${channelOrThread}:${userId || 'unknown-user'}`;
+  }
+  return userId ? `${params.channelId}:${userId}` : params.channelId;
 }
 
 export class DiscordAdapter extends BaseChannelAdapter {
@@ -429,6 +467,15 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const userId = message.author.id;
     const displayName = message.author.username || message.author.id;
     const isGuild = !!message.guild;
+    const isThread = typeof message.channel?.isThread === 'function' ? message.channel.isThread() : false;
+    const sessionScope = 解析会话范围(getBridgeContext().store.getSetting('bridge_discord_session_scope'));
+    const sessionKey = 构建Discord会话键({
+      sessionScope,
+      guildId: message.guild?.id || null,
+      channelId: chatId,
+      threadId: isThread ? chatId : null,
+      userId,
+    });
 
     // Authorization check
     if (!this.isAuthorized(userId, chatId)) return;
@@ -538,6 +585,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const address = {
       channelType: 'discord' as const,
       chatId,
+      sessionKey,
       userId,
       displayName,
     };
@@ -583,6 +631,15 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const chatId = interaction.channelId;
     const userId = interaction.user.id;
     const displayName = interaction.user.username;
+    const isThread = typeof interaction.channel?.isThread === 'function' ? interaction.channel.isThread() : false;
+    const sessionScope = 解析会话范围(getBridgeContext().store.getSetting('bridge_discord_session_scope'));
+    const sessionKey = 构建Discord会话键({
+      sessionScope,
+      guildId: interaction.guildId || null,
+      channelId: chatId,
+      threadId: isThread ? chatId : null,
+      userId,
+    });
 
     if (!this.isAuthorized(userId, chatId)) return;
 
@@ -601,6 +658,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       address: {
         channelType: 'discord',
         chatId,
+        sessionKey,
         userId,
         displayName,
       },

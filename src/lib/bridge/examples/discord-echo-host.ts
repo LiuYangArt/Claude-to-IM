@@ -8,6 +8,10 @@ import {
   type 技能系统,
   type 只读源码配置,
 } from './discord-lightweight-skills';
+import {
+  反馈Issue工作流,
+  type 反馈工作流配置,
+} from './feedback-issue-workflow';
 import type {
   BridgeStore,
   LLMProvider,
@@ -52,12 +56,23 @@ interface 桥接配置 {
     group_policy?: 'open' | 'disabled';
     require_mention?: boolean;
     stream_enabled?: boolean;
+    session_scope?: 'per_user' | 'per_thread' | 'per_channel';
   };
   openai?: {
     enabled?: boolean;
     base_url?: string;
     api_key?: string;
     model?: string;
+  };
+  github?: {
+    enabled?: boolean;
+    api_base_url?: string;
+    api_token?: string;
+    default_repo?: string;
+    request_timeout_ms?: number;
+  };
+  feedback_issue?: {
+    enabled?: boolean;
   };
   persona?: 人格配置;
   source_context?: 源码上下文配置;
@@ -161,7 +176,8 @@ class InMemoryStore implements BridgeStore {
     if (!session) return null;
 
     const binding = Array.from(this.bindings.values()).find(item => item.codepilotSessionId === id);
-    const 频道提示词 = binding ? this.已加载人格.频道提示词.get(binding.chatId) : undefined;
+    const 频道键 = binding ? 提取频道人格键(binding.chatId) : '';
+    const 频道提示词 = 频道键 ? this.已加载人格.频道提示词.get(频道键) : undefined;
     const systemPrompt = 频道提示词 || this.已加载人格.默认提示词 || session.system_prompt;
     return systemPrompt ? { ...session, system_prompt: systemPrompt } : session;
   }
@@ -303,12 +319,30 @@ class OpenAICompatibleLLM implements LLMProvider {
     private readonly model: string,
     private readonly 源码配置: 已规范源码配置,
     private readonly 技能系统: 技能系统,
+    private readonly 反馈工作流: 反馈Issue工作流 | null,
   ) {}
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
     return new ReadableStream<string>({
       start: async controller => {
         try {
+          if (this.反馈工作流) {
+            const 反馈结果 = await this.反馈工作流.handle({
+              sessionId: params.sessionId,
+              prompt: params.prompt,
+              conversationHistory: params.conversationHistory,
+            });
+            if (反馈结果.handled) {
+              const text = (反馈结果.text || '').trim();
+              if (text) {
+                controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: text })}\n`);
+              }
+              controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ usage: undefined }) })}\n`);
+              controller.close();
+              return;
+            }
+          }
+
           const 技能上下文 = 构建技能上下文(params.prompt, params.workingDirectory, this.源码配置, this.技能系统);
           记录技能命中日志(技能上下文);
           const response = await fetch(joinUrl(this.baseUrl, '/responses'), {
@@ -422,6 +456,20 @@ function 记录技能命中日志(技能上下文: { 名称: string; 原因: str
   }
 }
 
+function 提取频道人格键(bindingChatId: string): string {
+  const raw = (bindingChatId || '').trim();
+  if (!raw.includes(':')) return raw;
+
+  const parts = raw.split(':').filter(Boolean);
+  if (parts.length >= 3) {
+    return parts[1] || raw;
+  }
+  if (parts.length === 2) {
+    return parts[0] || raw;
+  }
+  return raw;
+}
+
 function 读取配置文件(): 桥接配置 {
   const configPath = path.resolve(process.cwd(), 'config', 'discord-bridge.json');
   if (!existsSync(configPath)) {
@@ -524,6 +572,11 @@ function 校验配置(config: 桥接配置): void {
 }
 
 function buildSettings(config: 桥接配置) {
+  const 会话范围 = config.discord.session_scope || 'per_user';
+  if (!['per_user', 'per_thread', 'per_channel'].includes(会话范围)) {
+    throw new Error('discord.session_scope 仅支持 per_user | per_thread | per_channel');
+  }
+
   return {
     remote_bridge_enabled: 'true',
     bridge_auto_start: 'false',
@@ -537,6 +590,7 @@ function buildSettings(config: 桥接配置) {
     bridge_discord_group_policy: config.discord.group_policy || 'open',
     bridge_discord_require_mention: String(config.discord.require_mention ?? true),
     bridge_discord_stream_enabled: String(config.discord.stream_enabled ?? true),
+    bridge_discord_session_scope: 会话范围,
   };
 }
 
@@ -547,11 +601,48 @@ function createLlm(config: 桥接配置, 已规范源码: 已规范源码配置,
       throw new Error('openai.enabled=true 时，必须填写 openai.base_url、openai.api_key、openai.model');
     }
     console.log(`[llm] 使用 OpenAI 兼容接口：${openai.base_url}`);
-    return new OpenAICompatibleLLM(openai.base_url.trim(), openai.api_key.trim(), openai.model.trim(), 已规范源码, 技能系统);
+    return new OpenAICompatibleLLM(
+      openai.base_url.trim(),
+      openai.api_key.trim(),
+      openai.model.trim(),
+      已规范源码,
+      技能系统,
+      create反馈工作流配置(config, openai.base_url.trim(), openai.api_key.trim(), openai.model.trim()),
+    );
   }
 
   console.log('[llm] 当前使用 Echo 模式');
   return new EchoLLM(已规范源码, 技能系统);
+}
+
+function create反馈工作流配置(
+  config: 桥接配置,
+  openaiBaseUrl: string,
+  openaiApiKey: string,
+  model: string,
+): 反馈Issue工作流 | null {
+  const enabled = config.feedback_issue?.enabled !== false;
+  if (!enabled) return null;
+
+  const githubEnabled = config.github?.enabled !== false;
+  if (!githubEnabled) return null;
+
+  const workflowConfig: 反馈工作流配置 = {
+    enabled: true,
+    openaiBaseUrl,
+    openaiApiKey,
+    model,
+    githubApiBaseUrl: config.github?.api_base_url?.trim() || 'https://api.github.com',
+    githubToken: config.github?.api_token?.trim() || undefined,
+    defaultTargetRepo: config.github?.default_repo?.trim() || undefined,
+    requestTimeoutMs: config.github?.request_timeout_ms,
+  };
+
+  if (!workflowConfig.defaultTargetRepo) {
+    console.warn('[feedback] 未配置 github.default_repo，首次分诊时会要求用户指定 owner/repo');
+  }
+
+  return new 反馈Issue工作流(workflowConfig);
 }
 
 function 提取关键词(问题: string): string[] {

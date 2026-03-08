@@ -59,7 +59,7 @@ describe('lightweight-skills', () => {
   it('加载仓库内置 skills 并解析元信息', () => {
     const 技能系统 = 加载技能系统(process.cwd());
 
-    const 必备技能 = ['project-overview', 'code-search', 'bug-diagnosis', 'issue-draft'];
+    const 必备技能 = ['project-overview', 'code-search', 'bug-diagnosis', 'feedback-intake', 'issue-draft', 'issue-submit'];
     for (const 技能名 of 必备技能) {
       assert.ok(技能系统.技能列表.has(技能名), `缺少内置 skill: ${技能名}`);
     }
@@ -73,7 +73,9 @@ describe('lightweight-skills', () => {
     assert.equal(路由技能('介绍一下这个项目', 技能系统.技能列表).名称, 'project-overview');
     assert.equal(路由技能('这个功能入口文件是哪个', 技能系统.技能列表).名称, 'code-search');
     assert.equal(路由技能('为什么这里会报错', 技能系统.技能列表).名称, 'bug-diagnosis');
+    assert.equal(路由技能('我想反馈一个功能建议', 技能系统.技能列表).名称, 'feedback-intake');
     assert.equal(路由技能('帮我整理一个 issue 草稿', 技能系统.技能列表).名称, 'issue-draft');
+    assert.equal(路由技能('确认提交 issue', 技能系统.技能列表).名称, 'issue-submit');
     assert.equal(路由技能('我们先闲聊一下', 技能系统.技能列表).名称, 'support-answer');
   });
 

@@ -22,6 +22,7 @@ export type ChannelType = string;
 export interface ChannelAddress {
   channelType: ChannelType;
   chatId: string;        // Platform-specific chat/channel identifier
+  sessionKey?: string;   // Optional routing key for per-user/per-thread isolation
   userId?: string;       // Platform-specific user identifier (optional for group chats)
   displayName?: string;  // Human-readable name for audit logs
 }
