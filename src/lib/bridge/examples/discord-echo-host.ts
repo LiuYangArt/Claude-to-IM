@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { initBridgeContext } from '../context';
 import * as bridgeManager from '../bridge-manager';
 import {
@@ -12,6 +13,10 @@ import {
   反馈Issue工作流,
   type 反馈工作流配置,
 } from './feedback-issue-workflow';
+import {
+  执行模型驱动检索问答,
+  type 模型驱动源码配置,
+} from './discord-model-driven-retrieval';
 import type {
   BridgeStore,
   LLMProvider,
@@ -36,6 +41,16 @@ interface 源码上下文配置 {
   max_chars_per_file?: number;
   max_total_chars?: number;
   max_file_size_bytes?: number;
+  retrieval_mode?: 'keyword' | 'model_driven';
+  max_tool_rounds?: number;
+  max_read_files?: number;
+  max_read_chars_total?: number;
+  search_max_results?: number;
+  memory_first?: boolean;
+  memory_dirs?: string[];
+  memory_max_files?: number;
+  memory_max_chars_total?: number;
+  show_evidence_in_reply?: boolean;
 }
 
 interface 人格配置 {
@@ -57,6 +72,14 @@ interface 桥接配置 {
     require_mention?: boolean;
     stream_enabled?: boolean;
     session_scope?: 'per_user' | 'per_thread' | 'per_channel';
+    staged_reply_enabled?: boolean;
+    staged_ack_enabled?: boolean;
+    staged_ack_text?: string;
+    staged_ack_text_by_channel?: Record<string, string>;
+    staged_reaction_enabled?: boolean;
+    staged_reaction_processing?: string;
+    staged_reaction_done?: string;
+    staged_reaction_fallback?: string;
   };
   openai?: {
     enabled?: boolean;
@@ -83,7 +106,18 @@ interface 已加载人格配置 {
   频道提示词: Map<string, string>;
 }
 
-type 已规范源码配置 = 只读源码配置;
+interface 阶段回复配置 {
+  enabled: boolean;
+  ackEnabled: boolean;
+  ackTextByChannel: Record<string, string>;
+  defaultAckText: string;
+  reactionEnabled: boolean;
+  processingReaction: string;
+  doneReaction: string;
+  fallbackReaction: string;
+}
+
+type 已规范源码配置 = 模型驱动源码配置;
 
 const 忽略目录 = new Set([
   '.git',
@@ -320,6 +354,8 @@ class OpenAICompatibleLLM implements LLMProvider {
     private readonly 源码配置: 已规范源码配置,
     private readonly 技能系统: 技能系统,
     private readonly 反馈工作流: 反馈Issue工作流 | null,
+    private readonly 阶段回复配置: 阶段回复配置,
+    private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
@@ -345,7 +381,32 @@ class OpenAICompatibleLLM implements LLMProvider {
 
           const 技能上下文 = 构建技能上下文(params.prompt, params.workingDirectory, this.源码配置, this.技能系统);
           记录技能命中日志(技能上下文);
-          const response = await fetch(joinUrl(this.baseUrl, '/responses'), {
+
+          const 阶段确认文案 = 获取阶段确认文案(params.chatId, this.阶段回复配置);
+          if (阶段确认文案) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'status', data: JSON.stringify({ preview_text: 阶段确认文案 }) })}\n`);
+          }
+
+          if (this.源码配置.enabled && this.源码配置.retrievalMode === 'model_driven') {
+            const 检索结果 = await 执行模型驱动检索问答({
+              baseUrl: this.baseUrl,
+              apiKey: this.apiKey,
+              model: this.model,
+              params,
+              源码配置: this.源码配置,
+              技能上下文文本: 技能上下文.文本,
+              技能名称: 技能上下文.名称,
+              fetchImpl: this.fetchImpl,
+            });
+
+            if (检索结果.text.trim()) {
+              controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: 检索结果.text.trim() })}\n`);
+            }
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ usage: 检索结果.usage, evidence_insufficient: 检索结果.evidenceInsufficient }) })}\n`);
+            controller.close();
+            return;
+          }
+          const response = await this.fetchImpl(joinUrl(this.baseUrl, '/responses'), {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
@@ -555,7 +616,42 @@ function 规范化源码配置(config: 桥接配置): 已规范源码配置 {
     maxCharsPerFile: config.source_context?.max_chars_per_file || 1600,
     maxTotalChars: config.source_context?.max_total_chars || 5000,
     maxFileSizeBytes: config.source_context?.max_file_size_bytes || 200_000,
+    retrievalMode: config.source_context?.retrieval_mode || 'keyword',
+    maxToolRounds: config.source_context?.max_tool_rounds || 3,
+    maxReadFiles: config.source_context?.max_read_files || 6,
+    maxReadCharsTotal: config.source_context?.max_read_chars_total || 12_000,
+    searchMaxResults: config.source_context?.search_max_results || 20,
+    memoryFirst: config.source_context?.memory_first !== false,
+    memoryDirs: (config.source_context?.memory_dirs || ['docs', 'config/prompts']).filter(Boolean),
+    memoryMaxFiles: config.source_context?.memory_max_files || 4,
+    memoryMaxCharsTotal: config.source_context?.memory_max_chars_total || 6000,
+    showEvidenceInReply: config.source_context?.show_evidence_in_reply === true,
   };
+}
+
+function 规范化阶段回复配置(discordConfig: 桥接配置['discord']): 阶段回复配置 {
+  return {
+    enabled: discordConfig.staged_reply_enabled !== false,
+    ackEnabled: discordConfig.staged_ack_enabled !== false,
+    ackTextByChannel: discordConfig.staged_ack_text_by_channel || {},
+    defaultAckText: discordConfig.staged_ack_text?.trim() || '收到，我先看一下。',
+    reactionEnabled: discordConfig.staged_reaction_enabled !== false,
+    processingReaction: discordConfig.staged_reaction_processing?.trim() || '👀',
+    doneReaction: discordConfig.staged_reaction_done?.trim() || '✅',
+    fallbackReaction: discordConfig.staged_reaction_fallback?.trim() || '⚠️',
+  };
+}
+
+function 获取阶段确认文案(chatId: string | undefined, config: 阶段回复配置): string {
+  if (!config.enabled || !config.ackEnabled) return '';
+  if (chatId && config.ackTextByChannel[chatId]?.trim()) {
+    return config.ackTextByChannel[chatId].trim();
+  }
+  return config.defaultAckText;
+}
+
+function 是否证据不足文本(text: string): boolean {
+  return /证据不足|未找到依据|未找到足够依据/i.test(text);
 }
 
 function 校验配置(config: 桥接配置): void {
@@ -573,6 +669,7 @@ function 校验配置(config: 桥接配置): void {
 
 function buildSettings(config: 桥接配置) {
   const 会话范围 = config.discord.session_scope || 'per_user';
+  const 阶段回复 = 规范化阶段回复配置(config.discord);
   if (!['per_user', 'per_thread', 'per_channel'].includes(会话范围)) {
     throw new Error('discord.session_scope 仅支持 per_user | per_thread | per_channel');
   }
@@ -591,10 +688,19 @@ function buildSettings(config: 桥接配置) {
     bridge_discord_require_mention: String(config.discord.require_mention ?? true),
     bridge_discord_stream_enabled: String(config.discord.stream_enabled ?? true),
     bridge_discord_session_scope: 会话范围,
+    bridge_discord_staged_reply_enabled: String(阶段回复.enabled),
+    bridge_discord_staged_ack_enabled: String(阶段回复.enabled && 阶段回复.ackEnabled),
+    bridge_discord_staged_ack_text: 阶段回复.defaultAckText,
+    bridge_discord_staged_ack_text_by_channel: JSON.stringify(阶段回复.ackTextByChannel),
+    bridge_discord_staged_reaction_enabled: String(阶段回复.enabled && 阶段回复.reactionEnabled),
+    bridge_discord_staged_reaction_processing: 阶段回复.processingReaction,
+    bridge_discord_staged_reaction_done: 阶段回复.doneReaction,
+    bridge_discord_staged_reaction_fallback: 阶段回复.fallbackReaction,
   };
 }
 
 function createLlm(config: 桥接配置, 已规范源码: 已规范源码配置, 技能系统: 技能系统): LLMProvider {
+  const 阶段回复 = 规范化阶段回复配置(config.discord);
   const openai = config.openai;
   if (openai?.enabled) {
     if (!openai.base_url?.trim() || !openai.api_key?.trim() || !openai.model?.trim()) {
@@ -608,6 +714,7 @@ function createLlm(config: 桥接配置, 已规范源码: 已规范源码配置,
       已规范源码,
       技能系统,
       create反馈工作流配置(config, openai.base_url.trim(), openai.api_key.trim(), openai.model.trim()),
+      阶段回复,
     );
   }
 
@@ -812,7 +919,19 @@ async function main() {
   process.on('SIGTERM', shutdown);
 }
 
-main().catch(error => {
-  console.error('[fatal]', error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error('[fatal]', error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}
+
+export {
+  OpenAICompatibleLLM,
+  规范化源码配置,
+  规范化阶段回复配置,
+  获取阶段确认文案,
+  buildInput,
+  提取频道人格键,
+  是否证据不足文本,
+};

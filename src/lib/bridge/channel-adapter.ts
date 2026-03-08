@@ -13,6 +13,12 @@ import type {
   SendResult,
 } from './types.js';
 
+export interface MessageProcessResult {
+  hasError?: boolean;
+  hasResponse?: boolean;
+  evidenceInsufficient?: boolean;
+}
+
 export abstract class BaseChannelAdapter {
   /** Which channel type this adapter handles */
   abstract readonly channelType: ChannelType;
@@ -66,10 +72,20 @@ export abstract class BaseChannelAdapter {
   abstract isAuthorized(userId: string, chatId: string): boolean;
 
   /** Called when message processing starts (e.g., typing indicator). */
-  onMessageStart?(_chatId: string): void;
+  onMessageStart?(_chatId: string, _message?: InboundMessage): void;
 
   /** Called when message processing ends. */
-  onMessageEnd?(_chatId: string): void;
+  onMessageEnd?(_chatId: string, _message?: InboundMessage, _result?: MessageProcessResult): void;
+
+  /** Add a reaction to an inbound message when the platform supports it. */
+  async addReaction(_chatId: string, _messageId: string, _emoji: string): Promise<boolean> {
+    return false;
+  }
+
+  /** Remove a reaction previously added by the bot when supported. */
+  async removeReaction(_chatId: string, _messageId: string, _emoji: string): Promise<boolean> {
+    return false;
+  }
 
   /**
    * Acknowledge that an update has been fully processed.

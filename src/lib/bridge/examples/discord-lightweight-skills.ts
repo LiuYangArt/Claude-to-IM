@@ -9,6 +9,17 @@ export interface 只读源码配置 {
   maxCharsPerFile: number;
   maxTotalChars: number;
   maxFileSizeBytes: number;
+  retrievalMode?: 'keyword' | 'model_driven';
+  maxToolRounds?: number;
+  maxReadFiles?: number;
+  maxReadCharsTotal?: number;
+  searchMaxResults?: number;
+  memoryFirst?: boolean;
+  memoryDirs?: string[];
+  memoryMaxFiles?: number;
+  memoryMaxCharsTotal?: number;
+  insufficientEvidenceReply?: string;
+  showEvidenceInReply?: boolean;
 }
 
 interface 技能权限 {
@@ -280,13 +291,15 @@ export function 构建技能上下文(
   const 检索根目录 = 解析受限目录(配置.rootDir, 工作目录);
   const 技能说明文本 = 构建技能说明文本(路由结果.技能);
   const 技能来源 = 汇总技能来源(路由结果.技能);
+  const 使用模型驱动检索 = 配置.retrievalMode === 'model_driven'
+    && ['code-search', 'bug-diagnosis', 'support-answer'].includes(路由结果.名称);
 
   let 任务上下文 = { 文本: '', 来源: [] as string[] };
   if (路由结果.名称 === 'project-overview') {
     任务上下文 = 构建项目概览上下文(检索根目录);
-  } else if (路由结果.名称 === 'code-search') {
+  } else if (路由结果.名称 === 'code-search' && !使用模型驱动检索) {
     任务上下文 = 构建搜索型上下文(问题, 检索根目录, 配置, 'code-search');
-  } else if (路由结果.名称 === 'bug-diagnosis') {
+  } else if (路由结果.名称 === 'bug-diagnosis' && !使用模型驱动检索) {
     任务上下文 = 构建搜索型上下文(问题, 检索根目录, 配置, 'bug-diagnosis');
   } else if (路由结果.名称 === 'feedback-intake') {
     任务上下文 = 构建反馈分诊上下文(问题, 检索根目录, 配置);
@@ -294,7 +307,7 @@ export function 构建技能上下文(
     任务上下文 = 构建Issue草稿上下文(问题, 检索根目录, 配置);
   } else if (路由结果.名称 === 'issue-submit') {
     任务上下文 = 构建Issue提交上下文();
-  } else {
+  } else if (!使用模型驱动检索) {
     任务上下文 = 构建搜索型上下文(问题, 检索根目录, 配置, 'support-answer');
   }
 
@@ -303,6 +316,18 @@ export function 构建技能上下文(
     ...路由结果,
     文本: 段落,
     来源: Array.from(new Set([...技能来源, ...任务上下文.来源])),
+  };
+}
+
+export function 构建技能提示上下文(
+  问题: string,
+  技能系统: 技能系统,
+): 技能上下文结果 {
+  const 路由结果 = 路由技能(问题, 技能系统.技能列表);
+  return {
+    ...路由结果,
+    文本: 构建技能说明文本(路由结果.技能),
+    来源: 汇总技能来源(路由结果.技能),
   };
 }
 

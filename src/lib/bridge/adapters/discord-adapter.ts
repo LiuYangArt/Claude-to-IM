@@ -20,7 +20,7 @@ import type {
   SendResult,
 } from '../types.js';
 import type { FileAttachment } from '../types.js';
-import { BaseChannelAdapter, registerAdapterFactory } from '../channel-adapter.js';
+import { BaseChannelAdapter, registerAdapterFactory, type MessageProcessResult } from '../channel-adapter.js';
 import { getBridgeContext } from '../context.js';
 
 /** Max number of message IDs to keep for dedup. */
@@ -108,6 +108,48 @@ export class DiscordAdapter extends BaseChannelAdapter {
   private previewMessages = new Map<string, string>();
   /** Chats where preview has permanently failed. */
   private previewDegraded = new Set<string>();
+
+  private 读取阶段Emoji设置(键: string, 默认值: string): string {
+    return getBridgeContext().store.getSetting(键)?.trim() || 默认值;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async 添加消息反应(message: any, emoji: string): Promise<void> {
+    if (!emoji || !message || typeof message.react !== 'function') return;
+    try {
+      await message.react(emoji);
+    } catch {
+      // best effort
+    }
+  }
+
+  async addReaction(chatId: string, messageId: string, emoji: string): Promise<boolean> {
+    if (!emoji || !this.client) return false;
+    try {
+      const channel = await this.client.channels.fetch(chatId);
+      if (!channel || !('messages' in channel)) return false;
+      const message = await channel.messages.fetch(messageId);
+      await message.react(emoji);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async removeReaction(chatId: string, messageId: string, emoji: string): Promise<boolean> {
+    if (!emoji || !this.client || !this.botUserId) return false;
+    try {
+      const channel = await this.client.channels.fetch(chatId);
+      if (!channel || !('messages' in channel)) return false;
+      const message = await channel.messages.fetch(messageId);
+      const reaction = message.reactions?.resolve(emoji);
+      if (!reaction?.users?.remove) return false;
+      await reaction.users.remove(this.botUserId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -232,9 +274,15 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
   // ── Typing indicator ───────────────────────────────────────
 
-  onMessageStart(chatId: string): void {
+  onMessageStart(chatId: string, message?: InboundMessage): void {
     this.stopTyping(chatId);
     if (!this.client) return;
+
+    const reactionEnabled = getBridgeContext().store.getSetting('bridge_discord_staged_reaction_enabled') === 'true';
+    if (reactionEnabled && message?.raw) {
+      const processingEmoji = this.读取阶段Emoji设置('bridge_discord_staged_reaction_processing', '👀');
+      void this.添加消息反应(message.raw, processingEmoji);
+    }
 
     const sendTyping = () => {
       const channel = this.client?.channels.cache.get(chatId);
@@ -251,8 +299,15 @@ export class DiscordAdapter extends BaseChannelAdapter {
     this.typingIntervals.set(chatId, interval);
   }
 
-  onMessageEnd(chatId: string): void {
+  onMessageEnd(chatId: string, message?: InboundMessage, result?: MessageProcessResult): void {
     this.stopTyping(chatId);
+    const reactionEnabled = getBridgeContext().store.getSetting('bridge_discord_staged_reaction_enabled') === 'true';
+    if (!reactionEnabled || !message?.raw) return;
+
+    const emoji = result?.hasError || result?.evidenceInsufficient
+      ? this.读取阶段Emoji设置('bridge_discord_staged_reaction_fallback', '⚠️')
+      : this.读取阶段Emoji设置('bridge_discord_staged_reaction_done', '✅');
+    void this.添加消息反应(message.raw, emoji);
   }
 
   private stopTyping(chatId: string): void {
@@ -299,9 +354,16 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
       // Build message options
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const options: { content: string; components?: any[] } = {
+      const options: { content: string; components?: any[]; reply?: { messageReference: string; failIfNotExists: boolean } } = {
         content: text.slice(0, DISCORD_CHAR_LIMIT),
       };
+
+      if (message.replyToMessageId) {
+        options.reply = {
+          messageReference: message.replyToMessageId,
+          failIfNotExists: false,
+        };
+      }
 
       // Build inline buttons as Discord components
       if (message.inlineButtons && message.inlineButtons.length > 0 && discordJs) {
@@ -595,6 +657,7 @@ export class DiscordAdapter extends BaseChannelAdapter {
       address,
       text: text.trim(),
       timestamp: message.createdTimestamp,
+      raw: message,
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 

@@ -160,6 +160,7 @@ export async function processMessage(
     const stream = llm.streamChat({
       prompt: text,
       sessionId,
+      chatId: binding.chatId,
       sdkSessionId: binding.sdkSessionId || undefined,
       model: effectiveModel,
       systemPrompt: session?.system_prompt || undefined,
@@ -296,6 +297,9 @@ async function consumeStream(
           case 'status': {
             try {
               const statusData = JSON.parse(event.data);
+              if (onPartialText && typeof statusData.preview_text === 'string' && statusData.preview_text.trim()) {
+                try { onPartialText(statusData.preview_text.trim()); } catch { /* non-critical */ }
+              }
               if (statusData.session_id) {
                 capturedSdkSessionId = statusData.session_id;
                 store.updateSdkSessionId(sessionId, statusData.session_id);
