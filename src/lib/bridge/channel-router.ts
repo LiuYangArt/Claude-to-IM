@@ -14,7 +14,8 @@ import { getBridgeContext } from './context.js';
  */
 export function resolve(address: ChannelAddress): ChannelBinding {
   const { store } = getBridgeContext();
-  const existing = store.getChannelBinding(address.channelType, address.chatId);
+  const routingKey = resolveRoutingKey(address);
+  const existing = store.getChannelBinding(address.channelType, routingKey);
   if (existing) {
     // Verify the linked session still exists; if not, create a new one
     const session = store.getSession(existing.codepilotSessionId);
@@ -41,6 +42,7 @@ export function createBinding(
   const defaultProviderId = store.getSetting('bridge_default_provider_id') || '';
 
   const displayName = address.displayName || address.chatId;
+  const routingKey = resolveRoutingKey(address);
   const session = store.createSession(
     `Bridge: ${displayName}`,
     defaultModel,
@@ -55,7 +57,7 @@ export function createBinding(
 
   return store.upsertChannelBinding({
     channelType: address.channelType,
-    chatId: address.chatId,
+    chatId: routingKey,
     codepilotSessionId: session.id,
     workingDirectory: defaultCwd,
     model: defaultModel,
@@ -75,7 +77,7 @@ export function bindToSession(
 
   return store.upsertChannelBinding({
     channelType: address.channelType,
-    chatId: address.chatId,
+    chatId: resolveRoutingKey(address),
     codepilotSessionId,
     workingDirectory: session.working_directory,
     model: session.model,
@@ -97,4 +99,9 @@ export function updateBinding(
  */
 export function listBindings(channelType?: ChannelType): ChannelBinding[] {
   return getBridgeContext().store.listChannelBindings(channelType);
+}
+
+function resolveRoutingKey(address: ChannelAddress): string {
+  const key = address.sessionKey?.trim();
+  return key || address.chatId;
 }
