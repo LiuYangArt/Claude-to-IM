@@ -59,7 +59,10 @@ describe('lightweight-skills', () => {
   it('加载仓库内置 skills 并解析元信息', () => {
     const 技能系统 = 加载技能系统(process.cwd());
 
-    assert.equal(技能系统.技能列表.size, 4);
+    const 必备技能 = ['project-overview', 'code-search', 'bug-diagnosis', 'issue-draft'];
+    for (const 技能名 of 必备技能) {
+      assert.ok(技能系统.技能列表.has(技能名), `缺少内置 skill: ${技能名}`);
+    }
     assert.equal(技能系统.技能列表.get('project-overview')?.权限.filesystem, 'read-only');
     assert.ok((技能系统.技能列表.get('issue-draft')?.触发词 || []).includes('帮我整理一个 issue 草稿'));
   });
