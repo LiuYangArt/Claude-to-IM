@@ -201,6 +201,7 @@ export interface BridgeStore {
 export interface StreamChatParams {
   prompt: string;
   sessionId: string;
+  chatId?: string;
   sdkSessionId?: string;
   model?: string;
   systemPrompt?: string;

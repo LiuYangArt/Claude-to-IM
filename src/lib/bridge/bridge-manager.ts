@@ -59,6 +59,50 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   return { intervalMs, minDeltaChars, maxChars };
 }
 
+
+function 读取Discord阶段确认文案(chatId: string): string {
+  const { store } = getBridgeContext();
+  if (store.getSetting('bridge_discord_staged_reply_enabled') !== 'true') return '';
+  if (store.getSetting('bridge_discord_staged_ack_enabled') !== 'true') return '';
+
+  const rawMap = store.getSetting('bridge_discord_staged_ack_text_by_channel') || '{}';
+  let textByChannel: Record<string, string> = {};
+  try {
+    const parsed = JSON.parse(rawMap) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      textByChannel = Object.fromEntries(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+      );
+    }
+  } catch {
+    textByChannel = {};
+  }
+
+  const channelText = textByChannel[chatId]?.trim();
+  if (channelText) return channelText;
+  return (store.getSetting('bridge_discord_staged_ack_text') || '').trim();
+}
+
+async function 发送Discord阶段确认(
+  adapter: BaseChannelAdapter,
+  msg: InboundMessage,
+): Promise<void> {
+  if (adapter.channelType !== 'discord') return;
+  const ackText = 读取Discord阶段确认文案(msg.address.chatId);
+  if (!ackText) return;
+
+  try {
+    await deliver(adapter, {
+      address: msg.address,
+      text: ackText,
+      parseMode: 'plain',
+      replyToMessageId: msg.messageId,
+    });
+  } catch {
+    // best effort
+  }
+}
+
 /** Fire-and-forget: send a preview draft. Only degrades on permanent failure. */
 function flushPreview(
   adapter: BaseChannelAdapter,
@@ -483,11 +527,13 @@ async function handleMessage(
 
   if (!text && !hasAttachments) { ack(); return; }
 
+  await 发送Discord阶段确认(adapter, msg);
+
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
-  adapter.onMessageStart?.(msg.address.chatId);
+  adapter.onMessageStart?.(msg.address.chatId, msg);
 
   // Create an AbortController so /stop can cancel this task externally
   const taskAbort = new AbortController();
@@ -555,13 +601,15 @@ async function handleMessage(
     flushPreview(adapter, ps, cfg);
   } : undefined;
 
+  let processResult: Awaited<ReturnType<typeof engine.processMessage>> | null = null;
+
   try {
     // Pass permission callback so requests are forwarded to IM immediately
     // during streaming (the stream blocks until permission is resolved).
     // Use text or empty string for image-only messages (prompt is still required by streamClaude)
     const promptText = text || (hasAttachments ? 'Describe this image.' : '');
 
-    const result = await engine.processMessage(binding, promptText, async (perm) => {
+    processResult = await engine.processMessage(binding, promptText, async (perm) => {
       await broker.forwardPermissionRequest(
         adapter,
         msg.address,
@@ -575,12 +623,12 @@ async function handleMessage(
     }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText);
 
     // Send response text — render via channel-appropriate format
-    if (result.responseText) {
-      await deliverResponse(adapter, msg.address, result.responseText, binding.codepilotSessionId, msg.messageId);
-    } else if (result.hasError) {
+    if (processResult.responseText) {
+      await deliverResponse(adapter, msg.address, processResult.responseText, binding.codepilotSessionId, msg.messageId);
+    } else if (processResult.hasError) {
       const errorResponse: OutboundMessage = {
         address: msg.address,
-        text: `<b>Error:</b> ${escapeHtml(result.errorMessage)}`,
+        text: `<b>Error:</b> ${escapeHtml(processResult.errorMessage)}`,
         parseMode: 'HTML',
         replyToMessageId: msg.messageId,
       };
@@ -592,7 +640,7 @@ async function handleMessage(
     // stale ID so the next message starts fresh instead of retrying a broken resume.
     if (binding.id) {
       try {
-        const update = computeSdkSessionUpdate(result.sdkSessionId, result.hasError);
+        const update = computeSdkSessionUpdate(processResult.sdkSessionId, processResult.hasError);
         if (update !== null) {
           store.updateChannelBinding(binding.id, { sdkSessionId: update });
         }
@@ -610,7 +658,11 @@ async function handleMessage(
 
     state.activeTasks.delete(binding.codepilotSessionId);
     // Notify adapter that message processing ended
-    adapter.onMessageEnd?.(msg.address.chatId);
+    adapter.onMessageEnd?.(msg.address.chatId, msg, {
+      hasError: processResult?.hasError,
+      hasResponse: Boolean(processResult?.responseText),
+      evidenceInsufficient: /证据不足|未找到依据/i.test(processResult?.responseText || ''),
+    });
     // Commit the offset only after full processing (success or failure)
     ack();
   }
