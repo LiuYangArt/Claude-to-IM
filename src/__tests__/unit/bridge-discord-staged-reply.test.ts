@@ -46,7 +46,10 @@ async function 读取SSE事件(stream: ReadableStream<string>) {
   return events;
 }
 
-function 创建最小Store(settings: Record<string, string> = {}): BridgeStore {
+function 创建最小Store(
+  settings: Record<string, string> = {},
+  recentMessages: Array<{ role: string; content: string }> = [],
+): BridgeStore {
   const sessions = new Map<string, { id: string; working_directory: string; model: string }>();
   const bindings = new Map<string, any>();
   let nextId = 1;
@@ -83,7 +86,7 @@ function 创建最小Store(settings: Record<string, string> = {}): BridgeStore {
     },
     updateSessionProviderId: () => {},
     addMessage: () => {},
-    getMessages: () => ({ messages: [] }),
+    getMessages: () => ({ messages: recentMessages }),
     acquireSessionLock: () => true,
     renewSessionLock: () => {},
     releaseSessionLock: () => {},
@@ -128,12 +131,12 @@ describe('discord staged reply', () => {
       bot_token: 'token',
       staged_ack_text: '默认确认',
       staged_ack_text_by_channel: { 'c-1': '频道确认' },
-    } as any));
+    } as any), [{ role: 'user', content: '上一轮' }]);
 
     assert.equal(text, '频道确认');
   });
 
-  it('model-driven 模式会先发 status 预览，再输出最终回答且默认不暴露来源路径', async () => {
+  it('model-driven 模式在非首轮会先发 status 预览，再输出最终回答且默认不暴露来源路径', async () => {
     const rootDir = 创建临时仓库();
     const llm = new OpenAICompatibleLLM(
       'https://llm.example.com/v1',
@@ -168,7 +171,7 @@ describe('discord staged reply', () => {
       prompt: '帮我看看 Blender 怎么连接',
       sessionId: 's-1',
       chatId: 'c-1',
-      conversationHistory: [],
+      conversationHistory: [{ role: 'assistant', content: '你好，我在的。' }],
     }));
 
     assert.equal(events[0]?.type, 'status');
@@ -178,7 +181,7 @@ describe('discord staged reply', () => {
     assert.doesNotMatch(events[1]?.data || '', /docs\/blender\.md/);
   });
 
-  it('bridge-manager 会先发送短确认语，再发送最终回答', async () => {
+  it('bridge-manager 首轮消息不发送短确认语，直接发送最终回答', async () => {
     const sent: OutboundMessage[] = [];
     const store = 创建最小Store({
       bridge_default_work_dir: process.cwd(),
@@ -213,10 +216,50 @@ describe('discord staged reply', () => {
       timestamp: Date.now(),
     });
 
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].text, /最终答案/);
+    assert.equal(sent[0].replyToMessageId, 'in-1');
+  });
+
+  it('bridge-manager 非首轮消息仍会先发送短确认语，再发送最终回答', async () => {
+    const sent: OutboundMessage[] = [];
+    const store = 创建最小Store({
+      bridge_default_work_dir: process.cwd(),
+      bridge_default_model: 'gpt-test',
+      bridge_discord_staged_reply_enabled: 'true',
+      bridge_discord_staged_ack_enabled: 'true',
+      bridge_discord_staged_ack_text: '收到，我先看一下。',
+      bridge_discord_staged_ack_text_by_channel: JSON.stringify({}),
+      bridge_discord_stream_enabled: 'false',
+    }, [{ role: 'assistant', content: '上一轮回复' }]);
+
+    initBridgeContext({
+      store,
+      llm: {
+        streamChat: () => new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue(`data: ${JSON.stringify({ type: 'text', data: '最终答案' })}\n`);
+            controller.enqueue(`data: ${JSON.stringify({ type: 'result', data: JSON.stringify({ usage: undefined }) })}\n`);
+            controller.close();
+          },
+        }),
+      },
+      permissions: { resolvePendingPermission: () => false },
+      lifecycle: {},
+    });
+
+    const { _testOnly } = await import('../../lib/bridge/bridge-manager');
+    await _testOnly.handleMessage(创建MockDiscordAdapter(sent), {
+      messageId: 'in-2',
+      address: { channelType: 'discord', chatId: 'c-1', userId: 'u-1', displayName: 'tester' },
+      text: '继续上一题',
+      timestamp: Date.now(),
+    });
+
     assert.equal(sent.length, 2);
     assert.equal(sent[0].text, '收到，我先看一下。');
-    assert.equal(sent[0].replyToMessageId, 'in-1');
+    assert.equal(sent[0].replyToMessageId, 'in-2');
     assert.match(sent[1].text, /最终答案/);
-    assert.equal(sent[1].replyToMessageId, 'in-1');
+    assert.equal(sent[1].replyToMessageId, 'in-2');
   });
 });

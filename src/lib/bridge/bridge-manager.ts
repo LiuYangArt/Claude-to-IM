@@ -103,6 +103,12 @@ async function 发送Discord阶段确认(
   }
 }
 
+function 是否首轮会话消息(sessionId: string): boolean {
+  const { store } = getBridgeContext();
+  const { messages } = store.getMessages(sessionId, { limit: 1 });
+  return messages.length === 0;
+}
+
 /** Fire-and-forget: send a preview draft. Only degrades on permanent failure. */
 function flushPreview(
   adapter: BaseChannelAdapter,
@@ -527,10 +533,13 @@ async function handleMessage(
 
   if (!text && !hasAttachments) { ack(); return; }
 
-  await 发送Discord阶段确认(adapter, msg);
-
   // Regular message — route to conversation engine
   const binding = router.resolve(msg.address);
+  const 首轮消息 = 是否首轮会话消息(binding.codepilotSessionId);
+
+  if (!首轮消息) {
+    await 发送Discord阶段确认(adapter, msg);
+  }
 
   // Notify adapter that message processing is starting (e.g., typing indicator)
   adapter.onMessageStart?.(msg.address.chatId, msg);
