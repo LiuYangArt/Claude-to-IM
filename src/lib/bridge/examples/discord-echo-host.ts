@@ -46,6 +46,7 @@ interface 源码上下文配置 {
   max_read_files?: number;
   max_read_chars_total?: number;
   search_max_results?: number;
+  knowledge_dirs?: string[];
   memory_first?: boolean;
   memory_dirs?: string[];
   memory_max_files?: number;
@@ -621,8 +622,9 @@ function 规范化源码配置(config: 桥接配置): 已规范源码配置 {
     maxReadFiles: config.source_context?.max_read_files || 6,
     maxReadCharsTotal: config.source_context?.max_read_chars_total || 12_000,
     searchMaxResults: config.source_context?.search_max_results || 20,
+    knowledgeDirs: (config.source_context?.knowledge_dirs || ['docs/knowledge']).filter(Boolean),
     memoryFirst: config.source_context?.memory_first !== false,
-    memoryDirs: (config.source_context?.memory_dirs || ['docs', 'config/prompts']).filter(Boolean),
+    memoryDirs: (config.source_context?.memory_dirs || ['docs/knowledge', 'docs', 'config/prompts']).filter(Boolean),
     memoryMaxFiles: config.source_context?.memory_max_files || 4,
     memoryMaxCharsTotal: config.source_context?.memory_max_chars_total || 6000,
     showEvidenceInReply: config.source_context?.show_evidence_in_reply === true,

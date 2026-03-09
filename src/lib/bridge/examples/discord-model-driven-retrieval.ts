@@ -15,10 +15,12 @@ export interface 模型驱动源码配置 extends 只读源码配置 {
   maxReadFiles: number;
   maxReadCharsTotal: number;
   searchMaxResults: number;
+  knowledgeDirs: string[];
   memoryFirst: boolean;
   memoryDirs: string[];
   memoryMaxFiles: number;
   memoryMaxCharsTotal: number;
+  showEvidenceInReply: boolean;
 }
 
 export interface 阶段回复配置 {
@@ -86,6 +88,7 @@ interface 源码上下文输入 {
   max_read_files?: number;
   max_read_chars_total?: number;
   search_max_results?: number;
+  knowledge_dirs?: string[];
   memory_first?: boolean;
   memory_dirs?: string[];
   memory_max_files?: number;
@@ -126,8 +129,9 @@ export function 规范化模型驱动源码配置(config: 源码上下文输入 
     maxReadFiles: config?.max_read_files || 6,
     maxReadCharsTotal: config?.max_read_chars_total || 12_000,
     searchMaxResults: config?.search_max_results || 20,
+    knowledgeDirs: (config?.knowledge_dirs || ['docs/knowledge']).map(item => item.trim()).filter(Boolean),
     memoryFirst: config?.memory_first !== false,
-    memoryDirs: (config?.memory_dirs || ['docs', 'config/prompts']).map(item => item.trim()).filter(Boolean),
+    memoryDirs: (config?.memory_dirs || ['docs/knowledge', 'docs', 'config/prompts']).map(item => item.trim()).filter(Boolean),
     memoryMaxFiles: config?.memory_max_files || 4,
     memoryMaxCharsTotal: config?.memory_max_chars_total || 6000,
     showEvidenceInReply: config?.show_evidence_in_reply === true,
@@ -236,6 +240,19 @@ export async function 执行模型驱动检索问答(args: 模型驱动检索问
   const fetchImpl = args.fetchImpl || fetch;
   const retriever = 创建只读检索器(args.源码配置);
   const cited = new Set<string>();
+  const knowledge = 构建目录证据上下文(args.params.prompt, args.源码配置, args.源码配置.knowledgeDirs, '以下是项目知识文档证据：');
+  knowledge.sources.forEach(item => cited.add(item));
+  if (knowledge.text) {
+    const knowledgeDecision = await 请求知识文档直答(fetchImpl, args, knowledge.text);
+    if (knowledgeDecision.parsed && knowledgeDecision.value.type === 'final' && knowledgeDecision.value.evidence_sufficient !== false) {
+      return {
+        text: 组装最终文本(knowledgeDecision.value, cited, args.源码配置.showEvidenceInReply === true),
+        usage: knowledgeDecision.usage,
+        evidenceInsufficient: false,
+        usedFallback: false,
+      };
+    }
+  }
   const memory = 构建记忆上下文(args.params.prompt, args.源码配置);
   memory.sources.forEach(item => cited.add(item));
   const transcript: string[] = [];
@@ -287,10 +304,14 @@ export async function 执行模型驱动检索问答(args: 模型驱动检索问
 
 function 构建记忆上下文(prompt: string, config: 模型驱动源码配置): { text: string; sources: string[] } {
   if (!config.memoryFirst) return { text: '', sources: [] };
+  return 构建目录证据上下文(prompt, config, config.memoryDirs, '以下是优先读取的记忆文档证据：');
+}
+
+function 构建目录证据上下文(prompt: string, config: 模型驱动源码配置, dirs: string[], title: string): { text: string; sources: string[] } {
   const keywords = 提取关键词(prompt);
   if (keywords.length === 0) return { text: '', sources: [] };
   const candidates: Array<{ rel: string; score: number; content: string }> = [];
-  for (const dir of config.memoryDirs) {
+  for (const dir of dirs) {
     const absDir = path.resolve(config.rootDir, dir);
     const relDir = path.relative(config.rootDir, absDir);
     if (relDir.startsWith('..') || path.isAbsolute(relDir) || !existsSync(absDir)) continue;
@@ -314,7 +335,27 @@ function 构建记忆上下文(prompt: string, config: 模型驱动源码配置)
     sources.push(item.rel);
     total += block.length;
   }
-  return { text: blocks.length > 0 ? `以下是优先读取的记忆文档证据：\n\n${blocks.join('\n\n')}` : '', sources };
+  return { text: blocks.length > 0 ? `${title}\n\n${blocks.join('\n\n')}` : '', sources };
+}
+
+async function 请求知识文档直答(fetchImpl: typeof fetch, args: 模型驱动检索问答参数, knowledgeText: string): Promise<{ parsed: false; usage?: unknown } | { parsed: true; value: 模型决策; usage?: unknown }> {
+  const response = await fetchImpl(joinUrl(args.baseUrl, '/responses'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${args.apiKey}` },
+    body: JSON.stringify({
+      model: args.params.model || args.model,
+      stream: false,
+      input: 构建知识文档直答输入(args.params, args.技能上下文文本, knowledgeText),
+      instructions: 构建知识文档直答指令(args.params.systemPrompt, args.源码配置),
+    }),
+    signal: args.params.abortController?.signal,
+  });
+  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+  const data: any = await response.json();
+  const text = 提取响应文本(data).trim();
+  const parsed = 解析模型决策(text);
+  if (!parsed || parsed.type !== 'final') return { parsed: false, usage: data?.usage };
+  return { parsed: true, value: parsed, usage: data?.usage };
 }
 
 async function 请求模型决策(fetchImpl: typeof fetch, args: 模型驱动检索问答参数, transcript: string[], memoryText: string, forceFinal: boolean): Promise<{ parsed: false; usage?: unknown } | { parsed: true; value: 模型决策; usage?: unknown }> {
@@ -355,19 +396,33 @@ async function 回退回答(fetchImpl: typeof fetch, args: 模型驱动检索问
 }
 
 function 构建模型指令(systemPrompt: string | undefined, config: 模型驱动源码配置, usedRounds: number, forceFinal: boolean): string {
+  const knowledgeDirs = config.knowledgeDirs.filter(Boolean);
   const lines = [
     systemPrompt?.trim() || '',
     '你现在处于只读证据检索模式，必须先找仓库证据再回答。',
     '只允许使用 list_dir(path)、search_code(query, path, max_results)、read_file(path, offset, limit) 三个只读工具。',
-    '优先利用已提供的记忆文档证据；若不足，再查源码。',
+    knowledgeDirs.length > 0 ? `第一优先资料目录：${knowledgeDirs.join('、')}。先在这些目录找项目说明文档；只有证据仍不足时，才去查其它源码目录。` : '优先利用已提供的记忆文档证据；若不足，再查源码。',
     '不能编造；证据不足时必须明确写“证据不足”或“未找到依据”。',
     `工具预算：最多 ${config.maxToolRounds} 轮，当前已用 ${usedRounds} 轮。`,
     '输出必须是 JSON，且只能是 JSON。',
-    '工具请求格式：{"type":"tool","tool":"search_code","arguments":{"query":"...","path":"docs","max_results":5}}',
+    knowledgeDirs.length > 0 ? `第一轮工具请求应优先类似：{"type":"tool","tool":"search_code","arguments":{"query":"...","path":"${knowledgeDirs[0]}","max_results":5}}` : '工具请求格式：{"type":"tool","tool":"search_code","arguments":{"query":"...","path":"docs","max_results":5}}',
     '最终回答格式：{"type":"final","answer":"...","citations":["docs/a.md"],"evidence_sufficient":true}',
   ].filter(Boolean);
   if (forceFinal) lines.push('你已到达工具预算上限，这一次只能输出 final JSON，不能再请求工具。');
   return lines.join('\n');
+}
+
+function 构建知识文档直答指令(systemPrompt: string | undefined, config: 模型驱动源码配置): string {
+  const knowledgeDirs = config.knowledgeDirs.filter(Boolean);
+  return [
+    systemPrompt?.trim() || '',
+    '你现在只看项目知识文档证据，不允许调用工具，也不要假设你看过源码。',
+    knowledgeDirs.length > 0 ? `当前第一资料来源目录：${knowledgeDirs.join('、')}。` : '',
+    '如果知识文档已经足够回答，就输出 final JSON，evidence_sufficient=true。',
+    '如果知识文档不够，就输出 final JSON，说明证据不足，evidence_sufficient=false。',
+    '输出必须是 JSON，且只能是 JSON。',
+    '最终回答格式：{"type":"final","answer":"...","citations":["docs/knowledge/index.md"],"evidence_sufficient":true}',
+  ].filter(Boolean).join('\n');
 }
 
 function 构建模型输入(params: StreamChatParams, skillText: string, memoryText: string, transcript: string[], forceFinal: boolean): string {
@@ -378,6 +433,15 @@ function 构建模型输入(params: StreamChatParams, skillText: string, memoryT
   for (const item of params.conversationHistory || []) sections.push(`${item.role === 'assistant' ? 'Assistant' : 'User'}:\n${item.content}`);
   sections.push(`User:\n${params.prompt}`);
   if (forceFinal) sections.push('现在必须直接给出最终回答。');
+  return sections.join('\n\n');
+}
+
+function 构建知识文档直答输入(params: StreamChatParams, skillText: string, knowledgeText: string): string {
+  const sections: string[] = [];
+  if (skillText) sections.push(`Skill hints:\n${skillText}`);
+  sections.push(`Knowledge-first evidence:\n${knowledgeText}`);
+  for (const item of params.conversationHistory || []) sections.push(`${item.role === 'assistant' ? 'Assistant' : 'User'}:\n${item.content}`);
+  sections.push(`User:\n${params.prompt}`);
   return sections.join('\n\n');
 }
 

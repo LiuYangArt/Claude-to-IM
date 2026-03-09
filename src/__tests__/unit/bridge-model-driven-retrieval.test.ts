@@ -26,25 +26,38 @@ function 创建配置(rootDir: string): 模型驱动源码配置 {
     maxReadFiles: 2,
     maxReadCharsTotal: 120,
     searchMaxResults: 5,
+    knowledgeDirs: ['docs/knowledge'],
     memoryFirst: true,
-    memoryDirs: ['docs', 'config/prompts'],
+    memoryDirs: ['docs/knowledge', 'docs', 'config/prompts'],
     memoryMaxFiles: 2,
     memoryMaxCharsTotal: 800,
+    showEvidenceInReply: false,
   };
 }
 
 function 创建临时仓库() {
   const rootDir = mkdtempSync(path.join(os.tmpdir(), 'retrieval-test-'));
   临时目录列表.push(rootDir);
+  mkdirSync(path.join(rootDir, 'docs', 'knowledge', 'features'), { recursive: true });
   mkdirSync(path.join(rootDir, 'docs'), { recursive: true });
   mkdirSync(path.join(rootDir, 'src'), { recursive: true });
   mkdirSync(path.join(rootDir, 'config', 'prompts'), { recursive: true });
 
-  writeFileSync(path.join(rootDir, 'docs', 'blender.md'), [
+  writeFileSync(path.join(rootDir, 'docs', 'knowledge', 'index.md'), [
+    '# 项目知识库',
+    '',
+    '本项目通过 Discord 机器人宿主转发问题，并优先参考知识库文档回答。',
+  ].join('\n'));
+  writeFileSync(path.join(rootDir, 'docs', 'knowledge', 'features', 'blender.md'), [
     '# Blender Bridge',
     '',
     'Blender Bridge 通过 Discord 机器人宿主转发问题。',
     '如果要连接到 blender，需要先启动 bridge，然后检查配置。',
+  ].join('\n'));
+  writeFileSync(path.join(rootDir, 'docs', 'blender.md'), [
+    '# Legacy Blender Doc',
+    '',
+    '这是旧文档，不应优先于 docs/knowledge。',
   ].join('\n'));
   writeFileSync(path.join(rootDir, 'src', 'index.ts'), 'export const bridge = true;\n');
   writeFileSync(path.join(rootDir, 'config', 'prompts', 'default.md'), '默认人格会尽量引用仓库证据。\n');
@@ -88,7 +101,7 @@ describe('model-driven retrieval tools', () => {
     const second = 检索器.readFile('src/large.ts', 100, 100);
     assert.equal(second.ok, true);
 
-    const third = 检索器.readFile('docs/blender.md', 0, 50);
+    const third = 检索器.readFile('docs/knowledge/features/blender.md', 0, 50);
     assert.equal(third.ok, false);
     assert.match(third.error || '', /budget exhausted/);
   });
@@ -104,7 +117,44 @@ describe('model-driven retrieval tools', () => {
 });
 
 describe('model-driven retrieval loop', () => {
-  it('能够按工具循环读取证据并输出正确回答，默认不暴露来源路径', async () => {
+  it('知识文档足够时会直接回答，不再进入源码工具循环', async () => {
+    const rootDir = 创建临时仓库();
+    let 调用次数 = 0;
+
+    const fetchMock: typeof fetch = async (_input, init) => {
+      调用次数 += 1;
+      const body = JSON.parse(String(init?.body || '{}')) as { instructions?: string; input?: string };
+
+      assert.match(body.instructions || '', /只看项目知识文档证据/);
+      assert.match(body.input || '', /docs\/knowledge\/features\/blender\.md/);
+
+      return new Response(JSON.stringify({
+        output_text: JSON.stringify({
+          type: 'final',
+          answer: '根据知识库文档，先启动 bridge，再检查配置。',
+          citations: ['docs/knowledge/features/blender.md'],
+          evidence_sufficient: true,
+        }),
+      }), { status: 200 });
+    };
+
+    const result = await 执行模型驱动检索问答({
+      baseUrl: 'https://llm.example.com/v1',
+      apiKey: 'token',
+      model: 'gpt-test',
+      params: 创建参数('如何连接到 blender？'),
+      源码配置: 创建配置(rootDir),
+      技能上下文文本: '',
+      fetchImpl: fetchMock,
+    });
+
+    assert.equal(调用次数, 1);
+    assert.equal(result.usedFallback, false);
+    assert.equal(result.evidenceInsufficient, false);
+    assert.match(result.text, /先启动 bridge/);
+  });
+
+  it('知识文档不足时会再进入源码工具循环，默认不暴露来源路径', async () => {
     const rootDir = 创建临时仓库();
     let 调用次数 = 0;
 
@@ -112,23 +162,24 @@ describe('model-driven retrieval loop', () => {
       调用次数 += 1;
       const body = JSON.parse(String(init?.body || '{}')) as { instructions?: string };
 
+      if ((body.instructions || '').includes('只看项目知识文档证据')) {
+        return new Response(JSON.stringify({
+          output_text: JSON.stringify({
+            type: 'final',
+            answer: '知识文档还不够，需要继续查仓库其它证据。',
+            citations: ['docs/knowledge/features/blender.md'],
+            evidence_sufficient: false,
+          }),
+        }), { status: 200 });
+      }
+
       if ((body.instructions || '').includes('必须直接输出 final JSON')) {
         return new Response(JSON.stringify({
           output_text: JSON.stringify({
             type: 'final',
             answer: '根据仓库文档，先启动 bridge，再检查 Discord 配置。',
-            citations: ['docs/blender.md'],
+            citations: ['docs/knowledge/features/blender.md'],
             evidence_sufficient: true,
-          }),
-        }), { status: 200 });
-      }
-
-      if (调用次数 === 1) {
-        return new Response(JSON.stringify({
-          output_text: JSON.stringify({
-            type: 'tool',
-            tool: 'search_code',
-            arguments: { query: 'Blender Bridge', path: 'docs', max_results: 5 },
           }),
         }), { status: 200 });
       }
@@ -137,8 +188,18 @@ describe('model-driven retrieval loop', () => {
         return new Response(JSON.stringify({
           output_text: JSON.stringify({
             type: 'tool',
+            tool: 'search_code',
+            arguments: { query: 'Blender Bridge', path: 'docs/knowledge', max_results: 5 },
+          }),
+        }), { status: 200 });
+      }
+
+      if (调用次数 === 3) {
+        return new Response(JSON.stringify({
+          output_text: JSON.stringify({
+            type: 'tool',
             tool: 'read_file',
-            arguments: { path: 'docs/blender.md', offset: 0, limit: 200 },
+            arguments: { path: 'docs/knowledge/features/blender.md', offset: 0, limit: 200 },
           }),
         }), { status: 200 });
       }
@@ -147,7 +208,7 @@ describe('model-driven retrieval loop', () => {
         output_text: JSON.stringify({
           type: 'final',
           answer: '根据仓库文档，先启动 bridge，再检查 Discord 配置。',
-          citations: ['docs/blender.md'],
+          citations: ['docs/knowledge/features/blender.md'],
           evidence_sufficient: true,
         }),
       }), { status: 200 });
@@ -165,20 +226,34 @@ describe('model-driven retrieval loop', () => {
 
     assert.equal(result.usedFallback, false);
     assert.equal(result.evidenceInsufficient, false);
-    assert.doesNotMatch(result.text, /docs\/blender\.md/);
+    assert.doesNotMatch(result.text, /docs\/knowledge\/features\/blender\.md/);
     assert.match(result.text, /先启动 bridge/);
   });
 
   it('达到工具预算后会降级为证据不足说明，而不是编造答案', async () => {
     const rootDir = 创建临时仓库();
 
-    const fetchMock: typeof fetch = async () => new Response(JSON.stringify({
-      output_text: JSON.stringify({
-        type: 'tool',
-        tool: 'list_dir',
-        arguments: { path: '.' },
-      }),
-    }), { status: 200 });
+    const fetchMock: typeof fetch = async (_input, init) => {
+      const body = JSON.parse(String(init?.body || '{}')) as { instructions?: string };
+      if ((body.instructions || '').includes('只看项目知识文档证据')) {
+        return new Response(JSON.stringify({
+          output_text: JSON.stringify({
+            type: 'final',
+            answer: '知识文档不足，需要继续查证。',
+            citations: ['docs/knowledge/index.md'],
+            evidence_sufficient: false,
+          }),
+        }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({
+        output_text: JSON.stringify({
+          type: 'tool',
+          tool: 'list_dir',
+          arguments: { path: '.' },
+        }),
+      }), { status: 200 });
+    };
 
     const result = await 执行模型驱动检索问答({
       baseUrl: 'https://llm.example.com/v1',
