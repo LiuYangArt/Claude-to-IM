@@ -1,22 +1,22 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
-import { initBridgeContext } from '../context';
-import * as bridgeManager from '../bridge-manager';
+import { initBridgeContext } from '../context.js';
+import * as bridgeManager from '../bridge-manager.js';
 import {
   加载技能系统,
   构建技能上下文,
   type 技能系统,
   type 只读源码配置,
-} from './discord-lightweight-skills';
+} from './discord-lightweight-skills.js';
 import {
   反馈Issue工作流,
   type 反馈工作流配置,
-} from './feedback-issue-workflow';
+} from './feedback-issue-workflow.js';
 import {
   执行模型驱动检索问答,
   type 模型驱动源码配置,
-} from './discord-model-driven-retrieval';
+} from './discord-model-driven-retrieval.js';
 import type {
   BridgeStore,
   LLMProvider,
@@ -30,8 +30,8 @@ import type {
   PermissionLinkRecord,
   OutboundRefInput,
   UpsertChannelBindingInput,
-} from '../host';
-import type { ChannelBinding, ChannelType } from '../types';
+} from '../host.js';
+import type { ChannelBinding, ChannelType } from '../types.js';
 
 interface 源码上下文配置 {
   enabled?: boolean;

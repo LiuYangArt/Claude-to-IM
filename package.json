@@ -35,7 +35,8 @@
     "test:unit": "node --test --import tsx --test-timeout=15000 src/__tests__/unit/bridge-*.test.ts",
     "test": "npm run typecheck && npm run test:unit",
     "example": "npx tsx src/lib/bridge/examples/mock-host.ts",
-    "example:discord": "npx tsx src/lib/bridge/examples/discord-echo-host.ts"
+    "example:discord": "npx tsx src/lib/bridge/examples/discord-echo-host.ts",
+    "example:discord:dist": "node dist/lib/bridge/examples/discord-echo-host.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.62",

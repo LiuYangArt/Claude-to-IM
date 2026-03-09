@@ -7,7 +7,6 @@ services:
     restart: unless-stopped
     init: true
     working_dir: /app
-    command: npm run example:discord
     environment:
       TZ: Asia/Shanghai
     volumes:

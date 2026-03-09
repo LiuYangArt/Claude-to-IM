@@ -1,4 +1,4 @@
-import type { StreamChatParams } from '../host';
+import type { StreamChatParams } from '../host.js';
 
 export type 反馈意图 = 'bug' | 'feature' | 'unclear';
 
